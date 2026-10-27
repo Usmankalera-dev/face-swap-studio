@@ -53,11 +53,16 @@
   }
 
   async function detectPoints(input) {
-    var det = await faceapi.detectSingleFace(
-      input, new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.5 })
-    ).withFaceLandmarks();
-    if (!det) return null;
-    return det.landmarks.positions.map(function (p) { return [p.x, p.y]; });
+    // First try a strict threshold, then retry looser so smaller / angled
+    // faces are not missed entirely.
+    var thresholds = [0.5, 0.3];
+    for (var t = 0; t < thresholds.length; t++) {
+      var det = await faceapi.detectSingleFace(
+        input, new faceapi.TinyFaceDetectorOptions({ inputSize: 640, scoreThreshold: thresholds[t] })
+      ).withFaceLandmarks();
+      if (det) return det.landmarks.positions.map(function (p) { return [p.x, p.y]; });
+    }
+    return null;
   }
 
   // ---------- geometry ----------
@@ -99,9 +104,19 @@
       var d = [dstPts[i1][0], dstPts[i1][1], dstPts[i2][0], dstPts[i2][1], dstPts[i3][0], dstPts[i3][1]];
       var m = affineTransform(s, d);
       if (!m) continue;
+      // Expand the clip triangle ~2% around its centroid. Neighbouring
+      // triangles then overlap by a pixel or two, which hides the straight
+      // facet seams that otherwise show across cheeks and chin. The affine
+      // transform itself still uses the exact triangle, so the image content
+      // is not stretched by this expansion.
+      var cx = (d[0] + d[2] + d[4]) / 3, cy = (d[1] + d[3] + d[5]) / 3;
+      var dc = [];
+      for (var k = 0; k < 3; k++) {
+        dc.push(cx + (d[k * 2] - cx) * 1.02, cy + (d[k * 2 + 1] - cy) * 1.02);
+      }
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(d[0], d[1]); ctx.lineTo(d[2], d[3]); ctx.lineTo(d[4], d[5]);
+      ctx.moveTo(dc[0], dc[1]); ctx.lineTo(dc[2], dc[3]); ctx.lineTo(dc[4], dc[5]);
       ctx.closePath(); ctx.clip();
       ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
       ctx.drawImage(srcCanvas, 0, 0);
@@ -109,10 +124,34 @@
     }
   }
 
+  // Forehead points: 68-point landmarks stop at the brows, so a plain hull
+  // ends in a hard band below the hairline. Extend the brow points upward
+  // along the nose-to-brow axis so the swapped region reaches the hairline.
+  function foreheadPoints(targetPts) {
+    var box = bbox(targetPts);
+    var faceHeight = Math.max(1, box[3] - box[1]);
+    var browCentre = [
+      (targetPts[19][0] + targetPts[24][0]) / 2,
+      (targetPts[19][1] + targetPts[24][1]) / 2
+    ];
+    var noseTip = targetPts[30];
+    var ax = browCentre[0] - noseTip[0], ay = browCentre[1] - noseTip[1];
+    var len = Math.sqrt(ax * ax + ay * ay) || 1;
+    ax /= len; ay /= len;
+    var out = [];
+    for (var i = 17; i <= 26; i++) {
+      out.push([targetPts[i][0] + ax * faceHeight * 0.38, targetPts[i][1] + ay * faceHeight * 0.38]);
+    }
+    return out;
+  }
+
   function featheredMask(w, h, hull, blur) {
+    // NOTE: the mask canvas must start TRANSPARENT, not black. A black
+    // fill is fully opaque, so 'destination-in' would keep everything and
+    // the feathered edge would never happen. White hull on transparent
+    // background, blurred, gives a real alpha feather.
     var c = document.createElement('canvas'); c.width = w; c.height = h;
     var x = c.getContext('2d');
-    x.fillStyle = '#000'; x.fillRect(0, 0, w, h);
     x.fillStyle = '#fff';
     x.beginPath();
     hull.forEach(function (p, i) { if (i === 0) x.moveTo(p[0], p[1]); else x.lineTo(p[0], p[1]); });
@@ -125,18 +164,34 @@
   }
 
   // Returns a canvas holding the target with the source face blended in.
-  function swapOnto(targetCanvas, targetPts, srcCanvas, srcPts, triangles, colourMatch) {
+  // softBlur: true for photos (hides seams), false for video (blur filters
+  // per frame are a major cause of dropped frames and flicker).
+  // maskBlur: feather radius; video uses a smaller radius for the same reason.
+  function swapOnto(targetCanvas, targetPts, srcCanvas, srcPts, triangles, softBlur, maskBlur) {
     var w = targetCanvas.width, h = targetCanvas.height;
     var warped = document.createElement('canvas'); warped.width = w; warped.height = h;
     var wx = warped.getContext('2d');
     drawWarpedFace(wx, srcCanvas, srcPts, targetPts, triangles);
-    var mask = featheredMask(w, h, convexHull(targetPts), Math.max(6, w / 90));
-    wx.globalCompositeOperation = 'destination-in';
-    wx.drawImage(mask, 0, 0);
+    var soft = warped;
+    if (softBlur) {
+      // Slight blur on the warped face softens any remaining triangle seams
+      // before masking. If the browser ignores ctx.filter, the unblurred
+      // warped face is still used, so this never breaks the swap.
+      soft = document.createElement('canvas'); soft.width = w; soft.height = h;
+      var sx0 = soft.getContext('2d');
+      try { sx0.filter = 'blur(1.5px)'; } catch (e) {}
+      sx0.drawImage(warped, 0, 0);
+      try { sx0.filter = 'none'; } catch (e) {}
+    }
+    var hullPts = targetPts.concat(foreheadPoints(targetPts));
+    var mask = featheredMask(w, h, convexHull(hullPts), maskBlur || Math.max(10, w / 60));
+    var sx = soft.getContext('2d');
+    sx.globalCompositeOperation = 'destination-in';
+    sx.drawImage(mask, 0, 0);
     var out = document.createElement('canvas'); out.width = w; out.height = h;
     var ox = out.getContext('2d');
     ox.drawImage(targetCanvas, 0, 0);
-    ox.drawImage(warped, 0, 0);
+    ox.drawImage(soft, 0, 0);
     return out;
   }
 
@@ -149,22 +204,29 @@
     return [minX, minY, maxX, maxY];
   }
 
-  function meanColour(canvas, box) {
+  // Mean colour sampled ONLY at landmark points (cheeks, forehead, chin),
+  // never over the whole bounding box. The old box mean included the
+  // background (e.g. a white studio backdrop), which shifted the face
+  // colour far too dark or bright and made swaps look wrong.
+  function meanColour(canvas, points) {
     var ctx = canvas.getContext('2d');
-    var x = Math.max(0, Math.floor(box[0])), y = Math.max(0, Math.floor(box[1]));
-    var w = Math.min(canvas.width - x, Math.ceil(box[2] - box[0]));
-    var h = Math.min(canvas.height - y, Math.ceil(box[3] - box[1]));
-    var data = ctx.getImageData(x, y, w, h).data;
-    var r = 0, g = 0, b = 0, n = data.length / 4;
-    for (var i = 0; i < data.length; i += 4) { r += data[i]; g += data[i + 1]; b += data[i + 2]; }
-    return [r / n, g / n, b / n];
+    var r = 0, g = 0, b = 0, n = 0;
+    points.forEach(function (p) {
+      var x = Math.max(0, Math.min(canvas.width - 1, Math.round(p[0])));
+      var y = Math.max(0, Math.min(canvas.height - 1, Math.round(p[1])));
+      var d = ctx.getImageData(x, y, 1, 1).data;
+      r += d[0]; g += d[1]; b += d[2]; n++;
+    });
+    return n ? [r / n, g / n, b / n] : [128, 128, 128];
   }
+
+  function clampShift(v) { return Math.max(-50, Math.min(50, v)); }
 
   // Shift the source face colours toward the target face colours (photo mode).
   function colourMatchedSource(srcCanvas, srcPts, targetCanvas, targetPts) {
-    var sm = meanColour(srcCanvas, bbox(srcPts));
-    var tm = meanColour(targetCanvas, bbox(targetPts));
-    var dr = tm[0] - sm[0], dg = tm[1] - sm[1], db = tm[2] - sm[2];
+    var sm = meanColour(srcCanvas, srcPts);
+    var tm = meanColour(targetCanvas, targetPts);
+    var dr = clampShift(tm[0] - sm[0]), dg = clampShift(tm[1] - sm[1]), db = clampShift(tm[2] - sm[2]);
     var c = document.createElement('canvas'); c.width = srcCanvas.width; c.height = srcCanvas.height;
     var ctx = c.getContext('2d');
     ctx.drawImage(srcCanvas, 0, 0);
@@ -232,6 +294,18 @@
     return true;
   }
 
+  // Smoothed points actually drawn on screen. Raw detections jump frame
+  // to frame (landmark jitter + slow async detection), which is exactly
+  // what reads as flicker. Displayed points ease toward each new detection
+  // instead of snapping to it.
+  var displayedTargetPoints = null;
+
+  function pointsCentre(points) {
+    var sx = 0, sy = 0;
+    points.forEach(function (p) { sx += p[0]; sy += p[1]; });
+    return [sx / points.length, sy / points.length];
+  }
+
   async function videoDetectLoop() {
     while (videoRunning) {
       try {
@@ -239,8 +313,25 @@
         if (vw && !targetVideo.paused) {
           var pts = await detectPoints(targetVideo);
           if (pts) {
-            latestTargetPoints = scalePoints(pts, resultCanvas.width / vw, resultCanvas.height / vh);
-            latestTargetVideoSize = [vw, vh];
+            var scaled = scalePoints(pts, resultCanvas.width / vw, resultCanvas.height / vh);
+            // Outlier rejection: if the detected face centre jumped far from
+            // the previous centre, this detection is almost certainly wrong
+            // (another face, a false box, a blurred frame). Ignore it rather
+            // than letting the swapped face teleport and flicker.
+            if (latestTargetPoints) {
+              var cOld = pointsCentre(latestTargetPoints);
+              var cNew = pointsCentre(scaled);
+              var box = bbox(latestTargetPoints);
+              var faceW = Math.max(1, box[2] - box[0]);
+              var jump = Math.sqrt((cNew[0] - cOld[0]) * (cNew[0] - cOld[0]) + (cNew[1] - cOld[1]) * (cNew[1] - cOld[1]));
+              if (jump > faceW * 0.35) {
+                scaled = null;
+              }
+            }
+            if (scaled) {
+              latestTargetPoints = scaled;
+              latestTargetVideoSize = [vw, vh];
+            }
           }
         }
       } catch (e) { /* keep last good landmarks */ }
@@ -254,13 +345,25 @@
     if (vw && !targetVideo.paused && !targetVideo.ended) {
       resultCtx.drawImage(targetVideo, 0, 0, resultCanvas.width, resultCanvas.height);
       if (latestTargetPoints && sourcePoints && sourceTriangles) {
+        if (!displayedTargetPoints) {
+          displayedTargetPoints = latestTargetPoints.map(function (p) { return [p[0], p[1]]; });
+        } else {
+          // Ease displayed points 40% toward the latest detection each
+          // frame. This interpolates between slow detections and kills
+          // the snap-to-new-landmarks flicker.
+          for (var i = 0; i < displayedTargetPoints.length; i++) {
+            displayedTargetPoints[i][0] += (latestTargetPoints[i][0] - displayedTargetPoints[i][0]) * 0.4;
+            displayedTargetPoints[i][1] += (latestTargetPoints[i][1] - displayedTargetPoints[i][1]) * 0.4;
+          }
+        }
         // Note: source points stay in source-image coordinates; the affine
         // warp maps them onto the result-size target points. Do not scale them.
         var tmp = document.createElement('canvas');
         tmp.width = resultCanvas.width; tmp.height = resultCanvas.height;
         var tx = tmp.getContext('2d');
         tx.drawImage(targetVideo, 0, 0, resultCanvas.width, resultCanvas.height);
-        var swapped = swapOnto(tmp, latestTargetPoints, sourceCanvas, sourcePoints, sourceTriangles, false);
+        // Video: no seam blur and a smaller mask feather, so frames keep up.
+        var swapped = swapOnto(tmp, displayedTargetPoints, sourceCanvas, sourcePoints, sourceTriangles, false, 6);
         resultCtx.drawImage(swapped, 0, 0);
       }
     }
@@ -276,6 +379,8 @@
     resultCanvas.width = Math.round(vw * scale);
     resultCanvas.height = Math.round(vh * scale);
     resultCtx.fillStyle = '#000'; resultCtx.fillRect(0, 0, resultCanvas.width, resultCanvas.height);
+    displayedTargetPoints = null;
+    latestTargetPoints = null;
     videoRunning = true;
     targetVideo.muted = true;
     targetVideo.currentTime = 0;
@@ -327,18 +432,21 @@
   // ---------- UI wiring ----------
   $('sourceInput').addEventListener('change', function (e) {
     var file = e.target.files[0]; if (!file) return;
+    // Fresh object URL for the preview. The old code reused the Image
+    // object's URL after fileToImage revoked it, so previews rendered as
+    // thin broken strips instead of the photo.
+    $('sourcePreview').src = URL.createObjectURL(file);
     fileToImage(file).then(function (img) {
       sourceImg = img;
-      $('sourcePreview').src = img.src;
       updateSwapButton();
     });
   });
 
   $('targetPhotoInput').addEventListener('change', function (e) {
     var file = e.target.files[0]; if (!file) return;
+    $('targetPreview').src = URL.createObjectURL(file);
     fileToImage(file).then(function (img) {
       targetImg = img;
-      $('targetPreview').src = img.src;
       updateSwapButton();
     });
   });
