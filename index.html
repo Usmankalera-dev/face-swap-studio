@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FaceSwap Studio — Browser Face Swapping for Photos &amp; Video</title>
+<meta name="description" content="FaceSwap Studio swaps a face from one photo onto another photo or video, entirely in your browser. No uploads to a server. Built by Usman Kalera.">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/delaunator@5.0.0/delaunator.min.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="wrap">
+    <h1>FaceSwap Studio</h1>
+    <p class="tagline">Swap a face in a photo or video — right in your browser. Nothing is uploaded to a server.</p>
+    <p id="modelStatus" class="status">Loading face models… please wait.</p>
+  </div>
+</header>
+
+<main class="wrap">
+  <section class="notice">
+    <strong>Please use responsibly.</strong>
+    Only swap faces you have permission to use — your own face, or someone who agreed.
+    Do not use this to impersonate anyone, mislead people, or make deceptive videos.
+  </section>
+
+  <section class="how">
+    <div><span class="num">1</span><strong>Source face</strong><p>Upload a clear, front-facing photo of the face you want to use.</p></div>
+    <div><span class="num">2</span><strong>Target</strong><p>Upload the photo or video whose face should be replaced.</p></div>
+    <div><span class="num">3</span><strong>Swap</strong><p>Press Swap. Download the result as a PNG (photo) or a recorded video.</p></div>
+  </section>
+
+  <section class="grid">
+    <div class="card">
+      <h2>1 · Source face photo</h2>
+      <input type="file" id="sourceInput" accept="image/*">
+      <img id="sourcePreview" alt="Source face preview">
+      <p class="hint">Best: front-facing, good light, no sunglasses, face clearly visible.</p>
+    </div>
+
+    <div class="card">
+      <h2>2 · Target photo or video</h2>
+      <div class="tabs">
+        <button type="button" id="tabPhoto" class="tab active">Photo</button>
+        <button type="button" id="tabVideo" class="tab">Video</button>
+      </div>
+      <div id="targetPhotoBox">
+        <input type="file" id="targetPhotoInput" accept="image/*">
+        <img id="targetPreview" alt="Target photo preview">
+      </div>
+      <div id="targetVideoBox" class="hidden">
+        <input type="file" id="targetVideoInput" accept="video/*">
+        <video id="targetVideo" controls playsinline muted></video>
+        <p class="hint">Short clips work best. Front-facing shots swap cleanest. Desktop Chrome is recommended for video.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="actions">
+    <button type="button" id="swapBtn" disabled>Swap face</button>
+    <button type="button" id="recordBtn" class="ghost hidden">● Record swapped video</button>
+    <button type="button" id="stopBtn" class="ghost hidden">■ Stop recording</button>
+    <a id="downloadLink" class="btn hidden" download>Download result</a>
+    <p id="workStatus" class="status"></p>
+  </section>
+
+  <section class="card result-card">
+    <h2>Result</h2>
+    <canvas id="resultCanvas"></canvas>
+    <p class="hint" id="resultHint">Your swapped photo or video preview will appear here. For video, press Swap to see the live swapped preview, then Record to save it.</p>
+  </section>
+
+  <section class="limits">
+    <h2>What affects quality?</h2>
+    <ul>
+      <li>Front-facing faces with similar angles swap best. Side profiles and covered faces will look off — that is a limit of landmark-based swapping, not a bug.</li>
+      <li>Matching light and skin tone helps. The photo mode adjusts the source face colour toward the target before blending.</li>
+      <li>The swap replaces the face region only. Hair, ears and background stay from the target.</li>
+      <li>Video is processed live in your browser, so longer videos take longer and need a capable device.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <p>FaceSwap Studio · Built by Usman Kalera · Runs fully in your browser using face-api.js (face detection + 68-point landmarks) and Delaunay-triangle warping. No server, no uploads.</p>
+  </footer>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
